@@ -10,6 +10,7 @@ import { getSnippetById } from "../../(play)/loaders";
 
 // utils
 import { calculateAccuracy, calculateCPM, noopKeys } from "./utils";
+import { catchError } from "@/lib/utils";
 
 // Components
 import { Button } from "@/components/ui/button";
@@ -27,49 +28,43 @@ import RaceDetails from "./race-details";
 import RaceTimer from "./race-timer";
 import { useToast } from "@/components/ui/use-toast";
 import RaceTrackerMultiplayer from "./race-tracker-mutliplayer";
+import { socket } from "@/lib/socket";
 
 // Types
-import type { ClientToServerEvents } from "@code-racer/wss/src/events/client-to-server";
-import type { ServerToClientEvents } from "@code-racer/wss/src/events/server-to-client";
 import { type RaceStatus, raceStatus } from "@code-racer/wss/src/types";
-import type { Snippet } from "@prisma/client";
+import type { Race, Snippet } from "@prisma/client";
 import type { User } from "next-auth";
-import type { Socket } from "socket.io-client";
 import { ChartTimeStamp, ReplayTimeStamp } from "./types";
+import { useCheckForUserNavigator } from "@/lib/user-system";
 
 type Participant = Omit<
   GameStateUpdatePayload["raceState"]["participants"][number],
   "socketId"
 >;
 
-let socket: Socket<ServerToClientEvents, ClientToServerEvents>;
-
-async function getSocketConnection() {
-  socket = io(process.env.NEXT_PUBLIC_WSS_URL!); // KEEP AS IS
-}
-
-export default function RaceMultiplayer({
+export function GameMultiplayer({
+  race,
+  raceId,
+  participantId,
+  participants,
+  currentRaceStatus,
   user,
-  practiceSnippet,
-  language,
 }: {
+  race: Race;
+  raceId: string;
+  participantId: string;
+  participants: Participant[];
+  currentRaceStatus: RaceStatus | null;
   user?: User;
-  practiceSnippet?: Snippet;
-  language: Language;
 }) {
   const { toast } = useToast();
   const [input, setInput] = useState("");
-  const [textIndicatorPosition, setTextIndicatorPosition] = useState(0);
-  const [currentRaceStatus, setCurrentRaceStatus] = useState<RaceStatus>(
-    //if the practiceSnippet is present, it means that the race is a practice race
-    Boolean(practiceSnippet) ? raceStatus.RUNNING : raceStatus.WAITING,
-  );
-  const [snippet, setSnippet] = useState<Snippet | undefined>(practiceSnippet);
+  const [snippet, setSnippet] = useState<Snippet | undefined>();
   const [startTime, setStartTime] = useState<Date | null>(null);
   const [submittingResults, setSubmittingResults] = useState(false);
   const [totalErrors, setTotalErrors] = useState(0);
 
-  const [raceTimeStamp, setRaceTimeStamp] = useState<ChartTimeStamp[]>([]);
+  const [chartTimeStamp, setChartTimeStamp] = useState<ChartTimeStamp[]>([]);
   const [replayTimeStamp, setReplayTimeStamp] = useState<ReplayTimeStamp[]>([]);
 
   const code = snippet?.code.trimEnd();
@@ -82,98 +77,54 @@ export default function RaceMultiplayer({
   const inputElement = useRef<HTMLInputElement | null>(null);
   const router = useRouter();
 
-  const [participants, setParticipants] = useState<Participant[]>([]);
-  const [raceStartCountdown, setRaceStartCountdown] = useState(0);
-  const [raceId, setRaceId] = useState<string | null>(null);
-  const [participantId, setParticipantId] = useState<string | undefined>(
-    undefined,
-  );
   const position = code
     ? parseFloat(
         (((input.length - errors.length) / code.length) * 100).toFixed(2),
       )
     : null;
-  const isRaceFinished = practiceSnippet
-    ? input === code
-    : currentRaceStatus === raceStatus.FINISHED;
+
+  const isRaceFinished = currentRaceStatus === raceStatus.FINISHED;
   const showRaceTimer = !!startTime && !isRaceFinished;
 
-  function startRaceEventHandlers() {
-    socket.on("UserRaceResponse", async (payload) => {
-      const { race, raceParticipantId } = payload;
-      const snippet = await getSnippetById(race.snippetId);
-      if (!snippet) {
-        toast({
-          title: "Error",
-          description: "Snippet not found",
-        });
-        return;
-      }
+  const isUserOnAdroid = useCheckForUserNavigator("android");
 
-      setSnippet(snippet);
-      setRaceId(race.id);
-      setParticipantId(raceParticipantId);
-    });
+  const startRaceEventHandlers = React.useCallback(async () => {
+    const snippet = await getSnippetById(race.snippetId);
+    if (!snippet) {
+      toast({
+        title: "Error",
+        description: "Snippet not found",
+      });
+      return;
+    }
 
-    socket.on("GameStateUpdate", (payload) => {
-      const { raceState } = payload;
-      setParticipants(raceState.participants);
-      setCurrentRaceStatus(raceState.status);
-
-      if (raceState.countdown) {
-        setRaceStartCountdown(raceState.countdown);
-      } else if (raceState.countdown === 0) {
-        setStartTime(new Date());
-      }
-    });
-
-    socket.on("UserEnterFullRace", () => {
-      router.refresh();
-    });
-
-    socket.on("UserRaceEnter", (payload) => {
-      const { raceParticipantId: participantId } = payload;
-      setParticipants((participants) => [
-        ...participants,
-        { id: participantId, position: 0, finishedAt: null },
-      ]);
-    });
-
-    socket.on("UserRaceLeave", (payload) => {
-      const { raceParticipantId: participantId } = payload;
-      setParticipants((participants) =>
-        participants.filter((participant) => participant.id !== participantId),
-      );
-    });
-  }
+    setSnippet(snippet);
+  }, []);
 
   // Connection to wss
   useEffect(() => {
-    if (practiceSnippet) return;
-    getSocketConnection().then(() => {
-      socket.on("connect", () => {
-        startRaceEventHandlers();
-        socket.emit("UserRaceRequest", {
-          language,
-          userId: user?.id,
-        });
-      });
+    startRaceEventHandlers();
+    socket.emit("UserRaceRequest", {
+      raceId,
+      participantId,
     });
-    return () => {
-      socket.disconnect();
-      socket.off("connect");
-    };
+
+    // return () => {
+    //   socket.disconnect();
+    //   socket.off("connect");
+    // };
+  }, [raceId, startRaceEventHandlers]);
+
+  // remove previous results
+  useEffect(() => {
+    localStorage.removeItem("chartTimeStamp");
+    if (!inputElement.current) return;
+    inputElement.current.focus();
   }, []);
 
   //send updated position to server
   useEffect(() => {
-    if (
-      !participantId ||
-      !raceId ||
-      currentRaceStatus !== raceStatus.RUNNING ||
-      !position
-    )
-      return;
+    if (!position) return;
 
     const gameLoop = setInterval(() => {
       if (currentRaceStatus === raceStatus.RUNNING) {
@@ -185,86 +136,53 @@ export default function RaceMultiplayer({
         });
       }
     }, 200);
+
     return () => clearInterval(gameLoop);
   }, [currentRaceStatus, position, participantId, raceId]);
 
-  async function endRace() {
-    if (!startTime) return;
-    const endTime = new Date();
-    const timeTaken = (endTime.getTime() - startTime.getTime()) / 1000;
 
-    localStorage.setItem(
-      "raceTimeStamp",
-      JSON.stringify([
-        ...raceTimeStamp,
-        {
-          char: input.slice(-1),
-          accuracy: calculateAccuracy(input.length, totalErrors),
-          cpm: calculateCPM(input.length, timeTaken),
-          time: Date.now(),
-        },
-      ]),
-    );
 
-    localStorage.setItem(
-      "replayTimeStamp",
-      JSON.stringify([
-        ...replayTimeStamp,
-        {
-          char: input.slice(-1),
-          textIndicatorPosition,
-          time: Date.now(),
-        },
-      ]),
-    );
+  function handleInputEvent(e: any /** React.FormEvent<HTMLInputElement>*/) {
+    if (!isUserOnAdroid) return;
+    if (!startTime) {
+      setStartTime(new Date());
+    }
+    const data = e.nativeEvent.data;
 
-    if (!snippet || !code) {
-      setSubmittingResults(false);
+    if (
+      input !== code?.slice(0, input.length) &&
+      e.nativeEvent.inputType !== "deleteContentBackward"
+    ) {
+      e.preventDefault();
       return;
     }
 
-    if (user) {
-      const result = await saveUserResultAction({
-        raceParticipantId: participantId,
-        timeTaken,
-        errors: totalErrors,
-        cpm: calculateCPM(code.length - 1, timeTaken),
-        accuracy: calculateAccuracy(code.length - 1, totalErrors),
-        snippetId: snippet.id,
-      });
-
-      if (!result) {
-        return router.refresh();
-      }
-
-      router.push(`/result?resultId=${result.id}`);
-    } else {
-      router.push(`/result?snippetId=${snippet.id}`);
+    if (e.nativeEvent.inputType === "insertText") {
+      setInput((prevInput) => prevInput + data);
+    } else if (e.nativeEvent.inputType === "deleteContentBackward") {
+      Backspace();
     }
-
-    setSubmittingResults(false);
+    changeTimeStamps(e);
   }
 
-  useEffect(() => {
-    if (isRaceFinished) {
-      endRace();
-    }
-  }, [isRaceFinished]);
-
-  useEffect(() => {
-    inputElement.current?.focus();
-
-    setReplayTimeStamp((prev) => [
-      ...prev,
-      {
-        char: input.slice(-1),
-        textIndicatorPosition,
-        time: Date.now(),
-      },
-    ]);
-  }, [input]);
-
   function handleKeyboardDownEvent(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (isUserOnAdroid) {
+      switch (e.key) {
+        case "Enter":
+          if (!startTime) {
+            setStartTime(new Date());
+          }
+          if (input !== code?.slice(0, input.length)) return;
+          Enter();
+          break;
+        // this is to delete the characters when "Enter" is pressed;
+        case "Backspace":
+          Backspace();
+          break;
+      }
+      return;
+    }
+
     // Restart
     if (e.key === "Escape") {
       handleRestart();
@@ -312,14 +230,6 @@ export default function RaceMultiplayer({
           break;
       }
     }
-    setReplayTimeStamp((prev) => [
-      ...prev,
-      {
-        char: input.slice(-1),
-        textIndicatorPosition,
-        time: Date.now(),
-      },
-    ]);
   }
 
   function Backspace() {
@@ -327,16 +237,11 @@ export default function RaceMultiplayer({
       return;
     }
 
-    if (textIndicatorPosition === input.length) {
-      setInput((prevInput) => prevInput.slice(0, -1));
-    }
+    setInput((prevInput) => prevInput.slice(0, -1));
 
-    setTextIndicatorPosition(
-      (prevTextIndicatorPosition) => prevTextIndicatorPosition - 1,
-    );
-
-    if (raceTimeStamp.length > 0 && errors.length == 0) {
-      setRaceTimeStamp((prev) => prev.slice(0, -1));
+    const character = input.slice(-1);
+    if (character !== " " && character !== "\n") {
+      setChartTimeStamp((prevArray) => prevArray.slice(0, -1));
     }
   }
 
@@ -353,23 +258,9 @@ export default function RaceMultiplayer({
         i++;
       }
 
-      setInput(input + "\n" + indent);
-      setTextIndicatorPosition((prevTextIndicatorPosition) => {
-        if (typeof prevTextIndicatorPosition === "number") {
-          return prevTextIndicatorPosition + 1 + indent.length;
-        } else {
-          return prevTextIndicatorPosition;
-        }
-      });
+      setInput((prevInput) => prevInput + "\n" + indent);
     } else {
-      setInput(input + "\n");
-      setTextIndicatorPosition((prevTextIndicatorPosition) => {
-        if (typeof prevTextIndicatorPosition === "number") {
-          return prevTextIndicatorPosition + 1;
-        } else {
-          return prevTextIndicatorPosition;
-        }
-      });
+      setInput((prevInput) => prevInput + "\n");
     }
   }
 
@@ -378,15 +269,13 @@ export default function RaceMultiplayer({
       setTotalErrors((prevTotalErrors) => prevTotalErrors + 1);
     }
 
-    if (
-      e.key === code?.[input.length] &&
-      errors.length === 0 &&
-      e.key !== " "
-    ) {
+    setInput((prevInput) => prevInput + e.key);
+
+    if (e.key !== " ") {
       const currTime = Date.now();
       const timeTaken = startTime ? (currTime - startTime.getTime()) / 1000 : 0;
-      setRaceTimeStamp((prev) => [
-        ...prev,
+      setChartTimeStamp((prevArray) => [
+        ...prevArray,
         {
           char: e.key,
           accuracy: calculateAccuracy(input.length, totalErrors),
@@ -396,36 +285,138 @@ export default function RaceMultiplayer({
       ]);
     }
 
-    setInput((prevInput) => prevInput + e.key);
-    setTextIndicatorPosition(
-      (prevTextIndicatorPosition) => prevTextIndicatorPosition + 1,
-    );
+    setReplayTimeStamp((prev) => [
+      ...prev,
+      {
+        char: input.slice(-1),
+        textIndicatorPosition: input.length,
+        time: Date.now(),
+      },
+    ]);
   }
+
+// since this logic of setting timestamps will be reused
+function changeTimeStamps(e: any) {
+  if (!code) return;
+  let value: string;
+
+  // if keyboardDown event is the one that calls this
+  if (e.key) {
+    value = e.key;
+    // so, this is where we can access the value of the key pressed on mobile
+  } else {
+    const data = e.nativeEvent.data;
+
+    if (e.nativeEvent.inputType === "deleteContentBackward") {
+      // the 2nd to the last character
+      const latestValue = input[input.length - 2];
+      if (!latestValue) {
+        value = "";
+      } else {
+        value = latestValue;
+      }
+    } else if (e.nativeEvent.inputType === "insertText") {
+      value = data;
+    } else {
+      value = "Enter";
+    }
+  }
+
+  if (value === code[input.length - 1] && value !== " ") {
+    const currTime = Date.now();
+    const timeTaken = startTime ? (currTime - startTime.getTime()) / 1000 : 0;
+    setChartTimeStamp((prev) => [
+      ...prev,
+      {
+        char: value,
+        accuracy: calculateAccuracy(input.length, totalErrors),
+        cpm: calculateCPM(input.length, timeTaken),
+        time: currTime,
+      },
+    ]);
+  }
+  setReplayTimeStamp((prev) => [
+    ...prev,
+    {
+      char: input.slice(-1),
+      textIndicatorPosition: input.length,
+      time: Date.now(),
+    },
+  ]);
+}
 
   function handleRestart() {
     setStartTime(null);
     setInput("");
-    setTextIndicatorPosition(0);
     setTotalErrors(0);
+    setReplayTimeStamp([]);
+    setChartTimeStamp([]);
   }
+
+  useEffect(() => {
+    if (isRaceFinished) {
+      if (!startTime) return;
+      const endTime = new Date();
+      const timeTaken = (endTime.getTime() - startTime.getTime()) / 1000;
+
+      localStorage.setItem(
+        "chartTimeStamp",
+        JSON.stringify([
+          ...chartTimeStamp,
+          {
+            char: input.slice(-1),
+            accuracy: calculateAccuracy(input.length, totalErrors),
+            cpm: calculateCPM(input.length, timeTaken),
+            time: Date.now(),
+          },
+        ]),
+      );
+
+      localStorage.setItem(
+        "replayTimeStamp",
+        JSON.stringify([
+          ...replayTimeStamp,
+          {
+            char: input.slice(-1),
+            textIndicatorPosition: input.length,
+            time: Date.now(),
+          },
+        ]),
+      );
+
+      if (!snippet || !code) {
+        setSubmittingResults(false);
+        return;
+      }
+
+      if (user) {
+        saveUserResultAction({
+          raceParticipantId: participantId,
+          timeTaken,
+          errors: totalErrors,
+          cpm: calculateCPM(code.length - 1, timeTaken),
+          accuracy: calculateAccuracy(code.length - 1, totalErrors),
+          snippetId: snippet.id,
+        })
+          .then((result) => {
+            if (!result) {
+              return router.refresh();
+            }
+            router.push(`/result?resultId=${result.id}`);
+          })
+          .catch((error) => {
+            catchError(error);
+          });
+      } else {
+        router.push(`/result?snippetId=${snippet.id}`);
+      }
+
+      setSubmittingResults(false);
+    }
+  });
 
   return (
     <>
-      {/* Debug purposes */}
-      {/* <pre className="max-w-sm p-8 rounded"> */}
-      {/*   {JSON.stringify( */}
-      {/*     { */}
-      {/*       participantId, */}
-      {/*       user, */}
-      {/*       isRaceFinished, */}
-      {/*       raceStatus, */}
-      {/*       participants, */}
-      {/*       position, */}
-      {/*     }, */}
-      {/*     null, */}
-      {/*     4, */}
-      {/*   )} */}
-      {/* </pre> */}
       <div
         className="relative flex flex-col w-3/4 gap-2 p-4 mx-auto rounded-md lg:p-8 bg-accent"
         onClick={() => {
@@ -433,23 +424,6 @@ export default function RaceMultiplayer({
         }}
         role="none"
       >
-        {raceId && currentRaceStatus != raceStatus.RUNNING && !startTime && (
-          <MultiplayerLoadingLobby participants={participants}>
-            {currentRaceStatus === raceStatus.WAITING && (
-              <div className="flex flex-col items-center text-2xl font-bold">
-                <div className="w-8 h-8 border-4 border-t-4 rounded-full border-muted-foreground border-t-warning animate-spin"></div>
-                Waiting for players
-              </div>
-            )}
-            {currentRaceStatus === raceStatus.COUNTDOWN &&
-              !startTime &&
-              Boolean(raceStartCountdown) && (
-                <div className="text-2xl font-bold text-center">
-                  Game starting in: {raceStartCountdown}
-                </div>
-              )}
-          </MultiplayerLoadingLobby>
-        )}
         {currentRaceStatus === raceStatus.RUNNING && (
           <>
             {raceId && code
@@ -463,7 +437,8 @@ export default function RaceMultiplayer({
               : null}
             <div className="flex justify-between mb-2 md:mb-4">
               <Heading
-                title="Type this code"
+                title={snippet?.name ? 
+                  "Type " + " Snippet " + snippet?.name : "Type this code"}
                 description="Start typing to get racing"
               />
               {user && snippet && (
@@ -490,18 +465,13 @@ export default function RaceMultiplayer({
                 ))}
               </div>
 
-              {code && (
-                <Code
-                  code={code}
-                  input={input}
-                  textIndicatorPosition={textIndicatorPosition}
-                />
-              )}
+              {code && <Code code={code} input={input} />}
               <input
                 type="text"
                 defaultValue={input}
                 ref={inputElement}
                 onKeyDown={handleKeyboardDownEvent}
+                onInput={handleInputEvent}
                 disabled={isRaceFinished}
                 className="absolute inset-y-0 left-0 w-full h-full p-8 rounded-md -z-40 focus:outline outline-blue-500 cursor-none"
                 onPaste={(e) => e.preventDefault()}
@@ -544,3 +514,5 @@ export default function RaceMultiplayer({
     </>
   );
 }
+
+export default GameMultiplayer;

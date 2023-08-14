@@ -23,11 +23,22 @@ export const updateUserProfile = safeAction(
   z.object({
     displayName: z.string(),
     biography: z.string().optional(),
-  }),
+  })
 )(async (input) => {
   const user = await getCurrentUser();
 
   if (!user) throw new UnauthorizedError();
+
+  const displayNameSchema =
+    input.displayName.length > 39
+      ? z
+          .string()
+          .max(39)
+          .refine((username) => username.trim())
+      : z.string();
+  const parsedDisplayName = await displayNameSchema.parseAsync(
+    input.displayName
+  );
 
   if (input.biography || input.biography === "") {
     const bioSchema =
@@ -44,7 +55,7 @@ export const updateUserProfile = safeAction(
         id: user.id,
       },
       data: {
-        name: input.displayName,
+        name: parsedDisplayName,
         bio: parsedBio,
       },
     });
@@ -54,7 +65,7 @@ export const updateUserProfile = safeAction(
         id: user.id,
       },
       data: {
-        name: input.displayName,
+        name: parsedDisplayName,
       },
     });
   }
@@ -76,5 +87,36 @@ export const updateUserAction = safeAction(z.object({ name: z.string() }))(
         name: input.name,
       },
     });
-  },
+  }
 );
+
+export const deleteUserResults = safeAction(z.object({}))(async () => {
+  const user = await getCurrentUser();
+  console.log(user?.id);
+
+  if (!user) throw new UnauthorizedError();
+
+  await prisma.result.deleteMany({
+    where: {
+      userId: user.id,
+    },
+  });
+
+  await prisma.achievement.deleteMany({
+    where: {
+      userId: user.id,
+    },
+  });
+
+  await prisma.user.update({
+    where: {
+      id: user.id,
+    },
+    data: {
+      topLanguages: [],
+      languagesMap: undefined,
+      averageCpm: 0,
+      averageAccuracy: 0,
+    },
+  });
+});
